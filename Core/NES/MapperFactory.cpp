@@ -274,6 +274,7 @@
 #include "NES/Mappers/Whirlwind/Lh51.h"
 #include "NES/Mappers/Whirlwind/Mapper40.h"
 #include "NES/Mappers/Whirlwind/Smb2j.h"
+#include "NES/Mappers/CustomMapper.h"
 
 BaseMapper* MapperFactory::GetMapperFromID(RomData& romData)
 {
@@ -624,7 +625,8 @@ BaseMapper* MapperFactory::GetMapperFromID(RomData& romData)
 		case 552: return new TaitoX1017();
 
 		case 682: return new Rainbow();
-
+		case 4000: return new CustomMapper(); 
+		
 		case UnifBoards::Ac08: return new Ac08(); //mapper 42?
 		case UnifBoards::Cc21: return new Cc21();
 		case UnifBoards::Ghostbusters63in1: return new Ghostbusters63in1(); //mapper 226?
