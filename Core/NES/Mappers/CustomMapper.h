@@ -101,6 +101,14 @@ private:
 		UpdateNametables();
 	}
 
+	// Latches with no reset on the real hardware. Follows Mesen's RAM power-on
+	// setting (all 0s / all 1s / random). If this name doesn't exist in your
+	// version, replace the body with any random byte source.
+	uint8_t RandomByte()
+	{
+		return GetPowerOnByte();
+	}
+
 	void MapRom(uint16_t start, uint16_t end, uint32_t offset)
 	{
 		SetCpuMemoryMapping(start, end, PrgMemoryType::PrgRom, offset, MemoryAccessType::Read);
@@ -158,21 +166,22 @@ protected:
 	uint32_t GetWorkRamSize() override { return 0; }
 	uint16_t RegisterStartAddress() override { return 0x4800; }
 	uint16_t RegisterEndAddress() override { return 0x4805; }
+	// Without this, reads of $4800-$4805 return open bus instead of ReadRegister
+	bool AllowRegisterRead() override { return true; }
 
 	void InitMapper() override
 	{
 		// Power-on: $C000 = last bank, RENDER = 0, everything else defined here
 		// (real hardware leaves the rest random)
 		_render = 0;
-		_prgReg[0] = 0x00;
-		_prgReg[1] = 0x20;
+		// Only the $C000 slot has a defined power-on value (last bank)
+		_prgReg[0] = 0x00 | (RandomByte() & 0x1F);
+		_prgReg[1] = 0x20 | (RandomByte() & 0x1F);
 		_prgReg[2] = 0x40 | 0x1F;
-		_prgReg[3] = 0x60;
+		_prgReg[3] = 0x60 | (RandomByte() & 0x07);
 		for(int i = 0; i < 4; i++) {
-			_chrReg[i] = i;
-			// Emulator default: last 4KB of CHR-RAM, clear of the default
-			// CHR banks. Real hardware powers up random.
-			_mirrorReg[i] = 60 + i;
+			_chrReg[i] = RandomByte() & 0x1F;
+			_mirrorReg[i] = RandomByte() & 0x3F;
 		}
 		UpdatePrg();
 		UpdateChr();
