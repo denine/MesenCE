@@ -170,13 +170,12 @@ protected:
 	bool AllowRegisterRead() override { return true; }
 	// Without this, NesConsole never calls ProcessCpuClock, so the IRQ counter never runs
 	bool EnableCpuClockHook() override { return true; }
+	// Without this the base class never calls MapperReadVram, so extended
+	// and Big Tile modes do nothing
+	bool EnableCustomVramRead() override { return true; }
 
 	void InitMapper() override
 	{
-		// Without this the base class never calls MapperReadVram, so extended
-		// and Big Tile modes do nothing
-		_hasCustomReadVram = true;
-
 		// Power-on: $C000 = last bank, RENDER = 0, everything else defined here
 		// (real hardware leaves the rest random)
 		_render = 0;
