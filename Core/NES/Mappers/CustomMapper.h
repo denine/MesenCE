@@ -18,15 +18,15 @@
  * battery PRG-RAM 32KB. Register it in MapperFactory.cpp with an unused ID.
  *
  * Step 3 done: MIRROR (nametables mapped onto CHR-RAM pages, mirror-all).
- * Step 4 done: extended mode (RENDER bit1 = 1, bit0 = 0), 8x8 palettes and
- * per-tile 8KB BG bank. Split 0 (16x16) keeps the normal attribute table
- * and only takes the bank from the extended byte. Splits 1-3 currently all
- * behave as 8x8 until the split step is done.
+ * Step 4 done: extended mode (RENDER bit1 = 1, bit0 = 0): the byte at the same
+ * position in page P|1 gives the tile's palette (bits 1-0) and a 4KB BG bank
+ * (bits 4-2). BG banks come from the first 32KB of CHR-RAM; in extended mode
+ * the CPU/sprite side ($0000-$1FFF) maps the last 32KB. Split intervals were
+ * dropped, RENDER bits 7-3 are reserved.
  * If your Mesen2 version needs a flag to enable custom VRAM reads, set it in
  * InitMapper (see how MMC5.h does it).
  * Step 5 done: Big Tile (RENDER bit0 = 1), alone or with extended mode.
- * Split bits are ignored in Big Tile mode.
- * Not done yet: split intervals 8x4 and 8x1 (strip pages, fine Y).
+ * With extended on, the nametable byte's bits 1-0 pick a 4KB BG bank (0-3).
  */
 class CustomMapper : public BaseMapper
 {
@@ -131,10 +131,13 @@ private:
 	void UpdateChr()
 	{
 		if(_render & 0x02) {
-			// 1KB mode: $0000-$0FFF fixed to the first 4KB, sprite slots at $1000-$1FFF
+			// Sprite/CPU side lives in the LAST 32KB of CHR-RAM (pages 32-63).
+			// BG tiles in extended mode live in the FIRST 32KB.
+			// $0000-$0FFF: fixed to the first 4KB of the upper half.
+			// $1000-$1FFF: four 1KB slots, 5-bit bank within the upper half.
 			for(int i = 0; i < 4; i++) {
-				SelectChrPage(i, i, ChrMemoryType::ChrRam);
-				SelectChrPage(4 + i, _chrReg[i], ChrMemoryType::ChrRam);
+				SelectChrPage(i, 32 + i, ChrMemoryType::ChrRam);
+				SelectChrPage(4 + i, 32 + (_chrReg[i] & 0x1F), ChrMemoryType::ChrRam);
 			}
 		} else {
 			// 2KB mode: four 2KB slots, bank counted in 2KB units
@@ -268,15 +271,11 @@ protected:
 					uint8_t nt = (_ntAddr >> 10) & 0x03;
 					uint32_t extPage = (_mirrorReg[nt] & 0x3F) | 1;
 					uint8_t value = ReadChrRamRaw(extPage * 0x400 + (_ntAddr & 0x3FF));
+					// Extended byte: bits 4-2 = 4KB bank (first 32KB of CHR-RAM),
+					// bits 1-0 = palette for this 8x8 tile
 					_extBank = (value >> 2) & 0x07;
 					_useBank = true;
-					if(((_render >> 6) & 0x03) == 0) {
-						// 16x16: normal attribute table for palettes,
-						// the extended byte only supplies the CHR bank
-						return BaseMapper::MapperReadVram(addr, type);
-					}
-					uint8_t p = value & 0x03;
-					return p | (p << 2) | (p << 4) | (p << 6);
+					return Replicate(value);
 				}
 				return BaseMapper::MapperReadVram(addr, type);
 			}
@@ -304,7 +303,9 @@ protected:
 				_fetchState = 0;
 			}
 			if(_bgPhase && _useBank) {
-				return ReadChrRamRaw(_extBank * 0x2000 + (addr & 0x1FFF));
+				// 4KB bank inside the first 32KB (3 bits, or 2 bits in Big Tile).
+				// The PPU's BG table bit (A12) is ignored.
+				return ReadChrRamRaw(_extBank * 0x1000 + (addr & 0x0FFF));
 			}
 		} else {
 			_fetchState = 0;
@@ -315,7 +316,15 @@ protected:
 	void Reset(bool softReset) override
 	{
 		BaseMapper::Reset(softReset);
+		// Same state on power-on and soft reset: only the pieces that have a
+		// defined power-on value. The other latches keep what they had.
+		_render = 0;
+		_prgReg[2] = 0x40 | 0x1F; // $C000 = last bank
+		_fetchState = 0;
+		_patLeft = 0;
 		StopIrq();
+		UpdatePrg();
+		UpdateChr();
 	}
 
 	// Called once per CPU cycle (M2)
