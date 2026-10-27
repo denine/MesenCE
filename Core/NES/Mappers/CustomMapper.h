@@ -168,9 +168,15 @@ protected:
 	uint16_t RegisterEndAddress() override { return 0x4805; }
 	// Without this, reads of $4800-$4805 return open bus instead of ReadRegister
 	bool AllowRegisterRead() override { return true; }
+	// Without this, NesConsole never calls ProcessCpuClock, so the IRQ counter never runs
+	bool EnableCpuClockHook() override { return true; }
 
 	void InitMapper() override
 	{
+		// Without this the base class never calls MapperReadVram, so extended
+		// and Big Tile modes do nothing
+		_hasCustomReadVram = true;
+
 		// Power-on: $C000 = last bank, RENDER = 0, everything else defined here
 		// (real hardware leaves the rest random)
 		_render = 0;
@@ -316,6 +322,9 @@ protected:
 	// Called once per CPU cycle (M2)
 	void ProcessCpuClock() override
 	{
+		// The base class does its own per-cycle bookkeeping
+		BaseMapper::ProcessCpuClock();
+
 		// Elapsed counts cycles after the fire, so it advances before the
 		// fire check: the fire cycle itself sets it to 0.
 		if(_irqFired) {
