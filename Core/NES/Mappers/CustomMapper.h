@@ -460,12 +460,12 @@ public:
 		return ntIndex < 4 && (_render & 0x02) != 0;
 	}
 
-	bool HasTileIndexOverride(ExtModeConfig& extCfg, uint8_t ntIndex) override
+	bool HasTileIndexOverride(ExtModeConfig& extCfg, uint8_t ntIndex)
 	{
 		return ntIndex < 4 && (_render & 0x01) != 0;
 	}
 
-	uint8_t GetTileIndexOverride(ExtModeConfig& extCfg, uint8_t ntIndex, uint16_t ntOffset) override
+	uint8_t GetTileIndexOverride(ExtModeConfig& extCfg, uint8_t ntIndex, uint16_t ntOffset)
 	{
 		// {index (6 bits), row parity, column parity}
 		uint8_t rowParity = (ntOffset >> 5) & 1;
