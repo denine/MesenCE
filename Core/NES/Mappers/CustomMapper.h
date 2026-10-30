@@ -4,9 +4,12 @@
 #include "NES/NesConsole.h"
 #include "NES/NesCpu.h"
 #include "NES/NesPpu.h"
+#include "NES/Debugger/IExtModeMapperDebug.h"
 #include "Utilities/Serializer.h"
 
 /*
+ * PRG layout: $5000 4KB RAM window, $6000 and $A000 16KB switchable,
+ * $E000 fixed last 8KB. Bank write slots: 00=$6000, 01=$A000, 11=RAM, 10 unused.
  * Custom mapper, steps 1-2: PRG/CHR banking, PRG readback, cycle IRQ with
  * elapsed-cycle readback (dejitter).
  *
@@ -14,8 +17,9 @@
  * not compile, compare names against Core/NES/BaseMapper.h and a small
  * existing mapper (for example Mapper183.h or Bmc190in1.h).
  *
- * Needs an NES 2.0 header with: PRG-ROM 512KB, CHR-ROM 0, CHR-RAM 64KB,
- * battery PRG-RAM 32KB. Register it in MapperFactory.cpp with an unused ID.
+ * Needs an NES 2.0 header with: PRG-ROM 512KB, CHR-ROM 0, CHR-RAM 128KB,
+ * battery PRG-RAM 32KB. RENDER bit 7 picks the 64KB CHR-RAM half the PPU sees.
+ * Header: 4E 45 53 1A 20 00 02 A8 0F 00 90 0B 00 00 00 00 Register it in MapperFactory.cpp with an unused ID.
  *
  * Step 3 done: MIRROR (nametables mapped onto CHR-RAM pages, mirror-all).
  * Step 4 done: extended mode (RENDER bit1 = 1, bit0 = 0): the byte at the same
@@ -28,7 +32,7 @@
  * Step 5 done: Big Tile (RENDER bit0 = 1), alone or with extended mode.
  * With extended on, the nametable byte's bits 1-0 pick a 4KB BG bank (0-3).
  */
-class CustomMapper : public BaseMapper
+class CustomMapper : public BaseMapper, public IExtModeMapperDebug
 {
 private:
 	// PRG regs hold the BANK write format: bit7=0, bits6-5=slot, bits4-0=bank
@@ -74,14 +78,20 @@ private:
 		_console->GetCpu()->ClearIrqSource(IRQSource::External);
 	}
 
-	// Each nametable maps a 1KB page of CHR-RAM (64 pages)
+	// RENDER bit 7 selects which 64KB half of the 128KB CHR-RAM chip the PPU
+	// sees (CHR slots, nametables, extended pages, per-tile BG banks).
+	// On hardware this is just the RAM's A16 pin.
+	uint32_t ChrHalfPages() { return (_render & 0x80) ? 64 : 0; }
+	uint32_t ChrHalfBytes() { return (_render & 0x80) ? 0x10000 : 0; }
+
+	// Each nametable maps a 1KB page of CHR-RAM (64 pages per half)
 	void UpdateNametables()
 	{
 		for(int i = 0; i < 4; i++) {
 			uint16_t start = 0x2000 + i * 0x400;
 			SetPpuMemoryMapping(
 				start, start + 0x3FF, ChrMemoryType::ChrRam,
-				(_mirrorReg[i] & 0x3F) * 0x400,
+				((_mirrorReg[i] & 0x3F) + ChrHalfPages()) * 0x400,
 				MemoryAccessType::ReadWrite
 			);
 		}
@@ -116,9 +126,10 @@ private:
 
 	void UpdatePrg()
 	{
-		MapRom(0x6000, 0x7FFF, (_prgReg[0] & 0x1F) * 0x2000);
-		MapRom(0x8000, 0xBFFF, (_prgReg[1] & 0x1F) * 0x4000);
-		MapRom(0xC000, 0xFFFF, (_prgReg[2] & 0x1F) * 0x4000);
+		// Two switchable 16KB windows, last 8KB of ROM fixed at $E000
+		MapRom(0x6000, 0x9FFF, (_prgReg[0] & 0x1F) * 0x4000);
+		MapRom(0xA000, 0xDFFF, (_prgReg[1] & 0x1F) * 0x4000);
+		MapRom(0xE000, 0xFFFF, 0x7E000);
 
 		bool writeProtect = (_render & 0x04) != 0;
 		SetCpuMemoryMapping(
@@ -135,14 +146,15 @@ private:
 			// BG tiles in extended mode live in the FIRST 32KB.
 			// $0000-$0FFF: fixed to the first 4KB of the upper half.
 			// $1000-$1FFF: four 1KB slots, 5-bit bank within the upper half.
+			uint32_t h = ChrHalfPages();
 			for(int i = 0; i < 4; i++) {
-				SelectChrPage(i, 32 + i, ChrMemoryType::ChrRam);
-				SelectChrPage(4 + i, 32 + (_chrReg[i] & 0x1F), ChrMemoryType::ChrRam);
+				SelectChrPage(i, h + 32 + i, ChrMemoryType::ChrRam);
+				SelectChrPage(4 + i, h + 32 + (_chrReg[i] & 0x1F), ChrMemoryType::ChrRam);
 			}
 		} else {
 			// 2KB mode: four 2KB slots, bank counted in 2KB units
 			for(int i = 0; i < 4; i++) {
-				SelectChrPage2x(i, _chrReg[i] * 2, ChrMemoryType::ChrRam);
+				SelectChrPage2x(i, ChrHalfPages() + _chrReg[i] * 2, ChrMemoryType::ChrRam);
 			}
 		}
 	}
@@ -155,6 +167,9 @@ private:
 			UpdateChr();
 		} else {
 			// Store in readback format. RAM window only keeps bits 2-0.
+			if(slot == 2) {
+				return; // unused slot code
+			}
 			uint8_t bank = (slot == 3) ? (value & 0x07) : (value & 0x1F);
 			_prgReg[slot] = (slot << 5) | bank;
 			UpdatePrg();
@@ -164,7 +179,7 @@ private:
 protected:
 	uint16_t GetPrgPageSize() override { return 0x2000; }
 	uint16_t GetChrPageSize() override { return 0x400; }
-	uint32_t GetChrRamSize() override { return 0x10000; }
+	uint32_t GetChrRamSize() override { return 0x20000; }
 	uint32_t GetSaveRamSize() override { return 0x8000; }
 	uint32_t GetWorkRamSize() override { return 0; }
 	uint16_t RegisterStartAddress() override { return 0x4800; }
@@ -179,13 +194,13 @@ protected:
 
 	void InitMapper() override
 	{
-		// Power-on: $C000 = last bank, RENDER = 0, everything else defined here
+		// Power-on: RENDER = 0, everything else defined here
 		// (real hardware leaves the rest random)
 		_render = 0;
-		// Only the $C000 slot has a defined power-on value (last bank)
+		// Slot 2 is unused; $E000 is fixed so nothing needs a defined value
 		_prgReg[0] = 0x00 | (RandomByte() & 0x1F);
 		_prgReg[1] = 0x20 | (RandomByte() & 0x1F);
-		_prgReg[2] = 0x40 | 0x1F;
+		_prgReg[2] = 0x40;
 		_prgReg[3] = 0x60 | (RandomByte() & 0x07);
 		for(int i = 0; i < 4; i++) {
 			_chrReg[i] = RandomByte() & 0x1F;
@@ -244,7 +259,7 @@ protected:
 
 	uint8_t ReadChrRamRaw(uint32_t offset)
 	{
-		return _chrRam[offset % _chrRamSize];
+		return _chrRam[(offset + ChrHalfBytes()) % _chrRamSize];
 	}
 
 	// Fetch order per tile: NT, AT, pattern low, pattern high.
@@ -319,12 +334,12 @@ protected:
 		// Same state on power-on and soft reset: only the pieces that have a
 		// defined power-on value. The other latches keep what they had.
 		_render = 0;
-		_prgReg[2] = 0x40 | 0x1F; // $C000 = last bank
 		_fetchState = 0;
 		_patLeft = 0;
 		StopIrq();
 		UpdatePrg();
 		UpdateChr();
+		UpdateNametables();
 	}
 
 	// Called once per CPU cycle (M2)
@@ -373,8 +388,9 @@ protected:
 			case 0x4801: WriteMirror(value); break;
 			case 0x4802:
 				_render = value;
-				UpdatePrg(); // bit 2 changes RAM write protect
-				UpdateChr(); // bit 1 changes CHR slot layout
+				UpdatePrg();        // bit 2 changes RAM write protect
+				UpdateChr();        // bits 1 and 7 change the CHR slot layout
+				UpdateNametables(); // bit 7 changes the nametable pages
 				break;
 			case 0x4804:
 				// Load latch low, acknowledge and cancel
@@ -408,5 +424,79 @@ protected:
 			_fetchState = 0;
 			_patLeft = 0;
 		}
+	}
+
+public:
+	// ---- Debugger support (tilemap viewer) ----
+	// Mirrors what MapperReadVram does during rendering, so the viewer shows
+	// the same picture. Only the four real nametables (0-3) are handled.
+
+	// Big Tile byte for a tile (ntOffset = row * 32 + column inside nametable nt)
+	uint8_t DebugBigByte(uint8_t nt, uint16_t ntOffset)
+	{
+		uint16_t ntAddr = (nt << 10) | (ntOffset & 0x3FF);
+		return ReadChrRamRaw((_mirrorReg[nt] & 0x3F) * 0x400 + BigTileOffset(ntAddr));
+	}
+
+	// Byte from the extended page (P|1) at the same position as the tile
+	uint8_t DebugExtByte(uint8_t nt, uint16_t ntOffset)
+	{
+		uint32_t extPage = (_mirrorReg[nt] & 0x3F) | 1;
+		if(_render & 0x01) {
+			uint16_t ntAddr = (nt << 10) | (ntOffset & 0x3FF);
+			return ReadChrRamRaw(extPage * 0x400 + BigTileOffset(ntAddr));
+		}
+		return ReadChrRamRaw(extPage * 0x400 + (ntOffset & 0x3FF));
+	}
+
+	bool HasExtendedAttributes(ExtModeConfig& extCfg, uint8_t ntIndex) override
+	{
+		return ntIndex < 4 && (_render & 0x03) != 0;
+	}
+
+	bool HasExtendedBackground(ExtModeConfig& extCfg, uint8_t ntIndex) override
+	{
+		// Per-tile bank exists in extended mode and Big Tile + extended
+		return ntIndex < 4 && (_render & 0x02) != 0;
+	}
+
+	bool HasTileIndexOverride(ExtModeConfig& extCfg, uint8_t ntIndex) override
+	{
+		return ntIndex < 4 && (_render & 0x01) != 0;
+	}
+
+	uint8_t GetTileIndexOverride(ExtModeConfig& extCfg, uint8_t ntIndex, uint16_t ntOffset) override
+	{
+		// {index (6 bits), row parity, column parity}
+		uint8_t rowParity = (ntOffset >> 5) & 1;
+		uint8_t colParity = ntOffset & 1;
+		return (DebugBigByte(ntIndex, ntOffset) & 0xFC) | (rowParity << 1) | colParity;
+	}
+
+	uint8_t GetExAttributePalette(ExtModeConfig& extCfg, uint8_t ntIndex, uint16_t ntOffset) override
+	{
+		if(_render & 0x01) {
+			if(_render & 0x02) {
+				// Big Tile + extended: field picked by position in the 2x2 block
+				uint8_t rowParity = (ntOffset >> 5) & 1;
+				uint8_t colParity = ntOffset & 1;
+				return (DebugExtByte(ntIndex, ntOffset) >> (((rowParity << 1) | colParity) * 2)) & 0x03;
+			}
+			// Plain Big Tile: palette is the nametable byte's bits 1-0
+			return DebugBigByte(ntIndex, ntOffset) & 0x03;
+		}
+		// Extended: bits 1-0 of the extended byte
+		return DebugExtByte(ntIndex, ntOffset) & 0x03;
+	}
+
+	uint8_t GetExBackgroundChrData(ExtModeConfig& extCfg, uint8_t ntIndex, uint16_t ntOffset, uint16_t chrAddr) override
+	{
+		uint8_t bank;
+		if(_render & 0x01) {
+			bank = DebugBigByte(ntIndex, ntOffset) & 0x03; // 2 bits, 4KB banks
+		} else {
+			bank = (DebugExtByte(ntIndex, ntOffset) >> 2) & 0x07; // 3 bits, 4KB banks
+		}
+		return ReadChrRamRaw(bank * 0x1000 + (chrAddr & 0x0FFF));
 	}
 };
